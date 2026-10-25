@@ -30,44 +30,40 @@ jobs:
             const PROCESSED_PATH = '.github/processed-discussions.json';
             const { owner, repo } = context.repo;
 
-            // ---------- 1. 已处理讨论编号 ----------
+            // 调试日志，确认当前跑的是新代码
+            core.info('=== 开始执行 GraphQL 同步逻辑 ===');
+
+            // 1. 读取已处理记录
             let processed = [];
             if (fs.existsSync(PROCESSED_PATH)) {
-              try {
-                processed = JSON.parse(fs.readFileSync(PROCESSED_PATH, 'utf8'));
-              } catch { processed = []; }
+              try { processed = JSON.parse(fs.readFileSync(PROCESSED_PATH, 'utf8')); } catch {}
             }
             const processedSet = new Set(processed);
 
-            // ---------- 2. 读取 book.txt ----------
+            // 2. 读取书籍数据
             let lines = [];
             if (fs.existsSync(BOOK_PATH)) {
-              lines = fs.readFileSync(BOOK_PATH, 'utf8')
-                .split('\n').filter(l => l.trim());
+              lines = fs.readFileSync(BOOK_PATH, 'utf8').split('\n').filter(l => l.trim());
             }
 
-            // ---------- 3. GraphQL 拉取最近讨论 ----------
+            // 3. GraphQL 拉取讨论
             const listQuery = `
               query($owner: String!, $repo: String!) {
                 repository(owner: $owner, name: $repo) {
                   discussions(first: 30, orderBy: {field: UPDATED_AT, direction: DESC}) {
-                    nodes {
-                      id
-                      number
-                      body
-                    }
+                    nodes { id number body }
                   }
                 }
               }
             `;
             const listRes = await github.graphql(listQuery, { owner, repo });
-            const discussions = (listRes.repository && listRes.repository.discussions.nodes) || [];
+            const discussions = listRes.repository.discussions.nodes || [];
 
             let changed = false;
             const newlyProcessed = [];
             const replies = [];
 
-            // ---------- 4. 逐条处理 ----------
+            // 4. 解析与处理
             for (const d of discussions) {
               if (processedSet.has(d.number)) continue;
 
@@ -80,26 +76,25 @@ jobs:
               const { type, isbn, coord, user } = action;
               if (!type || !isbn || !coord || !user) continue;
 
-              // 4.1 找 ISBN 对应行
+              // 找书
               let idx = lines.findIndex(l => {
                 const f = l.split(',');
                 return f[1] && f[1].trim() === isbn;
               });
 
-              // 4.2 找不到就创建新行（首次入库）
+              // 首次入库
               if (idx === -1) {
                 const parts = coord.split(',').map(Number);
                 const lat = isNaN(parts[0]) ? 0 : parts[0];
                 const lng = isNaN(parts[1]) ? 0 : parts[1];
                 const jitter = () => (Math.random() - 0.5) * 0.01;
                 const randCoord = `${(lat + jitter()).toFixed(6)},${(lng + jitter()).toFixed(6)}`;
-
                 const title  = action.title  || '《BBBB》';
                 const author = action.author || 'WWWW';
 
                 lines.push(`${title},${isbn},${author},00-00-00,${randCoord},PPPP`);
                 idx = lines.length - 1;
-                replies.push({ id: d.id, body: `📚 ISBN ${isbn} 首次入库，已创建记录。` });
+                replies.push({ id: d.id, body: `📚 ISBN ${isbn} 首次入库。` });
               }
 
               const fields = lines[idx].split(',');
@@ -108,7 +103,7 @@ jobs:
 
               if (type === 'borrow') {
                 if (currentBorrower !== 'PPPP') {
-                  replies.push({ id: d.id, body: `❌ 《${fields[0]}》已被 ${currentBorrower} 借走，无法借阅。` });
+                  replies.push({ id: d.id, body: `❌ 《${fields[0]}》已被 ${currentBorrower} 借走。` });
                   continue;
                 }
                 fields[4] = coord;
@@ -118,11 +113,11 @@ jobs:
                 replies.push({ id: d.id, body: `✅ 借阅成功：《${fields[0]}》，借阅人 ${user}。` });
               } else if (type === 'return') {
                 if (currentBorrower === 'PPPP') {
-                  replies.push({ id: d.id, body: `❌ 《${fields[0]}》当前未被借出，无需归还。` });
+                  replies.push({ id: d.id, body: `❌ 《${fields[0]}》未被借出，无需归还。` });
                   continue;
                 }
                 if (currentBorrower !== user) {
-                  replies.push({ id: d.id, body: `❌ 《${fields[0]}》由 ${currentBorrower} 借出，${user} 无法归还。` });
+                  replies.push({ id: d.id, body: `❌ 《${fields[0]}》由 ${currentBorrower} 借出，你无法归还。` });
                   continue;
                 }
                 fields[4] = coord;
@@ -135,7 +130,7 @@ jobs:
               newlyProcessed.push(d.number);
             }
 
-            // ---------- 5. 写回文件 ----------
+            // 5. 写回文件
             if (changed) {
               fs.mkdirSync('book', { recursive: true });
               fs.writeFileSync(BOOK_PATH, lines.join('\n') + '\n');
@@ -146,7 +141,7 @@ jobs:
               fs.writeFileSync(PROCESSED_PATH, JSON.stringify(all, null, 2));
             }
 
-            // ---------- 6. GraphQL 回复讨论 ----------
+            // 6. 回复讨论 (GraphQL)
             const commentMutation = `
               mutation($discussionId: ID!, $body: String!) {
                 addDiscussionComment(input: {discussionId: $discussionId, body: $body}) {
@@ -158,9 +153,10 @@ jobs:
               try {
                 await github.graphql(commentMutation, { discussionId: r.id, body: r.body });
               } catch (e) {
-                core.warning(`回复讨论失败: ${e.message}`);
+                core.warning(`回复失败: ${e.message}`);
               }
             }
+            core.info('=== 执行完毕 ===');
 
       - name: Commit changes
         run: |
