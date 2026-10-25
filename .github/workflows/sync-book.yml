@@ -61,7 +61,7 @@ jobs:
               }
             `;
             const listRes = await github.graphql(listQuery, { owner, repo });
-            const discussions = listRes.repository.discussions.nodes || [];
+            const discussions = (listRes.repository && listRes.repository.discussions.nodes) || [];
 
             let changed = false;
             const newlyProcessed = [];
