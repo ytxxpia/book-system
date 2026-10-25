@@ -1,0 +1,142 @@
+name: Sync Book from Discussions
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/15 * * * *'
+
+permissions:
+  contents: write
+  discussions: write
+
+concurrency:
+  group: sync-book
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Process discussions
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const BOOK_PATH = 'book/book.txt';
+            const PROCESSED_PATH = '.github/processed-discussions.json';
+            const { owner, repo } = context.repo;
+
+            let processed = [];
+            if (fs.existsSync(PROCESSED_PATH)) {
+              processed = JSON.parse(fs.readFileSync(PROCESSED_PATH, 'utf8'));
+            }
+            const processedSet = new Set(processed);
+
+            let lines = [];
+            if (fs.existsSync(BOOK_PATH)) {
+              lines = fs.readFileSync(BOOK_PATH, 'utf8')
+                .split('\n').filter(l => l.trim());
+            }
+
+            const { data: discussions } = await github.rest.discussions.list({
+              owner, repo, per_page: 30,
+              sort: 'updated', direction: 'desc',
+            });
+
+            let changed = false;
+            const newlyProcessed = [];
+            const replies = [];
+
+            for (const d of discussions) {
+              if (processedSet.has(d.number)) continue;
+
+              const match = (d.body || '').match(/<!--\s*BOOK_ACTION:\s*(\{.*?\})\s*-->/s);
+              if (!match) continue;
+
+              let action;
+              try { action = JSON.parse(match[1]); } catch { continue; }
+
+              const { type, isbn, coord, user } = action;
+              if (!type || !isbn || !coord || !user) continue;
+
+              // 4. 找 ISBN 对应行
+              let idx = lines.findIndex(l => {
+                const f = l.split(',');
+                return f[1] && f[1].trim() === isbn;
+              });
+
+              // 4.1 找不到就创建新行（首次扫码入库）
+              if (idx === -1) {
+                const parts = coord.split(',').map(Number);
+                const lat = isNaN(parts[0]) ? 0 : parts[0];
+                const lng = isNaN(parts[1]) ? 0 : parts[1];
+                const jitter = () => (Math.random() - 0.5) * 0.01;
+                const randCoord = `${(lat + jitter()).toFixed(6)},${(lng + jitter()).toFixed(6)}`;
+
+                lines.push(`《BBBB》,${isbn},WWWW,00-00-00,${randCoord},PPPP`);
+                idx = lines.length - 1;
+                replies.push({ number: d.number, body: `📚 ISBN ${isbn} 首次入库，已创建记录。` });
+              }
+
+              const fields = lines[idx].split(',');
+              while (fields.length < 6) fields.push('PPPP');
+              const currentBorrower = (fields[5] || 'PPPP').trim();
+
+              if (type === 'borrow') {
+                if (currentBorrower !== 'PPPP') {
+                  replies.push({ number: d.number, body: `❌ 《${fields[0]}》已被 ${currentBorrower} 借走，无法借阅。` });
+                  continue;
+                }
+                fields[4] = coord;
+                fields[5] = user;
+                lines[idx] = fields.join(',');
+                changed = true;
+                replies.push({ number: d.number, body: `✅ 借阅成功：《${fields[0]}》，借阅人 ${user}。` });
+              } else if (type === 'return') {
+                if (currentBorrower === 'PPPP') {
+                  replies.push({ number: d.number, body: `❌ 《${fields[0]}》当前未被借出，无需归还。` });
+                  continue;
+                }
+                if (currentBorrower !== user) {
+                  replies.push({ number: d.number, body: `❌ 《${fields[0]}》由 ${currentBorrower} 借出，${user} 无法归还。` });
+                  continue;
+                }
+                fields[4] = coord;
+                fields[5] = 'PPPP';
+                lines[idx] = fields.join(',');
+                changed = true;
+                replies.push({ number: d.number, body: `✅ 归还成功：《${fields[0]}》。` });
+              }
+
+              newlyProcessed.push(d.number);
+            }
+
+            if (changed) {
+              fs.mkdirSync('book', { recursive: true });
+              fs.writeFileSync(BOOK_PATH, lines.join('\n') + '\n');
+            }
+            if (newlyProcessed.length) {
+              const all = [...processed, ...newlyProcessed].slice(-500);
+              fs.mkdirSync('.github', { recursive: true });
+              fs.writeFileSync(PROCESSED_PATH, JSON.stringify(all, null, 2));
+            }
+
+            for (const r of replies) {
+              await github.rest.discussions.createComment({
+                owner, repo,
+                discussion_number: r.number,
+                body: r.body,
+              });
+            }
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add book/book.txt .github/processed-discussions.json
+          git diff --quiet && git diff --staged --quiet || \
+            (git commit -m "sync: update book.txt from discussions" && git push)
