@@ -30,7 +30,6 @@ jobs:
             const PROCESSED_PATH = '.github/processed-discussions.json';
             const { owner, repo } = context.repo;
 
-            // 调试日志，确认当前跑的是新代码
             core.info('=== 开始执行 GraphQL 同步逻辑 ===');
 
             // 1. 读取已处理记录
@@ -160,8 +159,8 @@ jobs:
 
       - name: Commit changes
         run: |
+          set -x
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add book/book.txt .github/processed-discussions.json
-          git diff --quiet && git diff --staged --quiet || \
-            (git commit -m "sync: update book.txt from discussions" && git push)
+          git add -A book/ .github/
+          git diff --quiet && git diff --staged --quiet || (git commit -m "sync: update book.txt from discussions" && git push)
